@@ -18,9 +18,12 @@
 # along with this program. If not, see <http://www.gnu.org/licenses/>.
 #
 
+import json
+import time
 import logging
 from pathlib import Path
 from typing import Any, Union
+import subprocess
 
 import ldap
 
@@ -39,6 +42,8 @@ logger = logging.getLogger("portal")
 
 PORTAL_SETTINGS_DIR = "/etc/yunohost/portal"
 ADMIN_ALIASES = ["root", "admin", "admins", "webmaster", "postmaster", "abuse"]
+
+USER_PENDING_INVITATIONS = Path("/etc/yunohost/.user_invitations/")
 
 
 def _get_user_infos(
@@ -341,3 +346,106 @@ def portal_update(
         }
     else:
         return {}
+
+
+def portal_invitation_get(token):
+
+    from stat import filemode
+
+    try:
+        Auth().get_session_cookie()
+    except Exception:
+        pass
+    else:
+        raise YunohostValidationError("You cannot register a new account while already logged-in")
+
+    from bottle import request
+    domain = request.get_header("host")
+    assert domain and "/" not in domain
+
+    if not (isinstance(token, str) and token.isalnum() and len(token) == 64):
+        raise YunohostValidationError("This invitation token is invalid. Invitation tokens are expected to be exactly 64 alphanumeric characters.")
+
+    invite_file = USER_PENDING_INVITATIONS / f"{token}.json"
+    # FIXME : need a good justification here that .exists() is safe against timing attacks. So far I don't have a clear answer
+    if not invite_file.exists():
+        raise YunohostValidationError("Sorry, this invitation does not exist, expired, or was already used.")
+
+    # Assert the permissions are right, which otherwise would be an indication that it can't be trusted
+    assert (USER_PENDING_INVITATIONS.owner(), USER_PENDING_INVITATIONS.group(), filemode(USER_PENDING_INVITATIONS.stat().st_mode)) == ("root", "ynh-portal", "drwx--x---")
+
+    # Assert the permissions are right, which otherwise would be an indication that it can't be trusted
+    assert (invite_file.owner(), invite_file.group(), filemode(invite_file.stat().st_mode)) == ("root", "ynh-portal", "-r--r-----")
+
+    infos = read_json(str(invite_file))
+    if infos["expires"] < time.time() or infos["domain"] != domain:
+        raise YunohostValidationError("This invitation does not exist or expired")
+
+    # FIXME : expired invites should get cleanedup at some point
+
+    return {
+        "username": infos["username"],
+        "allowed_to_change_username": infos["allowed_to_change_username"],
+        "domain": infos["domain"],
+        # "expires"
+        # "groups"
+        "external_email": infos["external_email"],
+        # "mailbox_quota"
+    }
+
+def _call_by_socket(socket_path, data):
+
+    import socket
+
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+
+        sock.connect(socket_path)
+
+        payload = json.dumps(data).encode()
+        sock.sendall(payload)
+        sock.shutdown(socket.SHUT_WR)
+
+        response = b""
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            response += chunk
+
+    return response.decode()
+
+
+def portal_invitation_consume(token, username, fullname, password, external_email=None):
+
+    data = {
+        "token": token,
+        "username": username,
+        "fullname": fullname,
+        "password": password,
+        "external_email": external_email
+    }
+
+    # FIXME : need to make sure that we probably obtain the localized message, which may involve passing a LANG or LC_ALL env variable idk
+
+    # Here, data is passed via stdin, which prevents the token and passwords from appearing in arguments which, even though we supposedly have proc-hidepid enable, is always a bit "eh" to have cleartext secrets in command arguments
+    # Generally speaking it also helps with escaping shenanigans etc, and we can limit the sudoer right to one specific command
+    #data_json = json.dumps(data)
+    #p = subprocess.run(["sudo", "yunohost", "user", "invitation", "consume", "--output-as", "json"], timeout=15, input=data_json.encode(), capture_output=True)
+    #if p.returncode != 0:
+    #    err = p.stderr.decode()
+    #    # FIXME: proper i18n
+    #    raise YunohostError(f"Unexpected error while attempting to create user from invitation: {err}")
+
+    #raw_out = p.stdout.decode().strip()
+
+    raw_out = _call_by_socket("/run/yunohost-user-invite-consume.sock", data)
+
+    # the standard output is likely to contain INFO / SUCCESS message
+    # (but at the same time we dont want to use --quiet which would also remove WARNING/ERROR)
+    # sooo let's take the last line that should contain the json result
+    raw_json = raw_out.strip().split("\n")[-1]
+    error = json.loads(raw_json)["error"]
+    if error:
+        raise YunohostError(f"Failed to create user: {error}")
+    else:
+        return

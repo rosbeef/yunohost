@@ -94,3 +94,45 @@ portal:
             api: GET /public
             authentication:
                 api: null
+
+        ### portal_invitation_get()
+        invitation_get:
+            action_help: Obtain info about a pending invitation
+            api: GET /invitation
+            authentication:
+                api: null
+            arguments:
+                --token:
+                    help: The invitation token
+
+        ### portal_invitation_consume()
+        invitation_consume:
+            action_help: Consume an invitation token to create an account
+            api: POST /invitation
+            authentication:
+                api: null
+            arguments:
+                --token:
+                    help: The invitation token
+                --username:
+                    help: The username of the new user. For example 'camille'
+                    extra:
+                        # The username may have been defined by the admin and may not be overridable
+                        required: False
+                        pattern: &pattern_username
+                            - !!str ^[a-z0-9_\.]+$
+                            - "pattern_username"
+                --fullname:
+                    help: The full name of the user. For example 'Camille Dupont'
+                    extra:
+                        required: True
+                        pattern: *pattern_fullname
+                --external-email:
+                    help: An external email to be used as mail forward / recovery email
+                    extra:
+                        required: False
+                        pattern: *pattern_email_forward
+                --password:
+                    help: The password chosen by the user
+                    extra:
+                        required: True

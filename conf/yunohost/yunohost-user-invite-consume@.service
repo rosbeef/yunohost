@@ -1,0 +1,8 @@
+[Service]
+ExecStart=/usr/bin/yunohost user invitation consume --output-as json
+User=root
+StandardInput=socket
+StandardOutput=socket
+
+[Install]
+WantedBy=multi-user.target

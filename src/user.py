@@ -25,6 +25,7 @@ import pwd
 import random
 import re
 import subprocess
+import time
 from logging import getLogger
 from pathlib import Path
 from typing import (
@@ -76,7 +77,236 @@ FIELDS_FOR_IMPORT = {
 ADMIN_ALIASES = ["root", "admin", "admins", "webmaster", "postmaster", "abuse"]
 
 
+INVITATIONS_VALIDITY = 7  # days
+USER_PENDING_INVITATIONS = Path("/etc/yunohost/.user_invitations/")
+USER_PENDING_REGISTRATIONS = Path("/etc/yunohost/.user_registrations/")
+
+
+def user_invite(*args, **kwargs):
+    return user_invitation_generate(*args, **kwargs)
+
+
+def user_invitation_generate(domain, username=None, groups=[], external_email=None, mailbox_quota="0", send_invite_via_email=False, allow_to_change_username=False) -> str:
+
+    from .domain import domain_list, _get_maindomain, _assert_domain_exists
+    from .utils.misc import random_ascii
+    from .utils.file_utils import chown, chmod, write_to_json
+
+    all_existing_usernames = {x.pw_name for x in pwd.getpwall()}
+    if username and username in all_existing_usernames:
+        raise YunohostValidationError("system_username_exists")
+
+    # Validate domain used for email address account
+    if domain is None:
+        if Moulinette.interface.type == "api":
+            raise YunohostValidationError(
+                "Invalid usage, you should specify a domain argument"
+            )
+        else:
+            # On affiche les differents domaines possibles
+            Moulinette.display(m18n.n("domains_available"))
+            for domain in domain_list()["domains"]:
+                Moulinette.display(f"- {domain}")
+
+            maindomain = _get_maindomain()
+            domain = Moulinette.prompt(
+                m18n.n("ask_user_domain") + f" (default: {maindomain})"
+            )
+            if not domain:
+                domain = maindomain
+    else:
+        _assert_domain_exists(domain)
+
+    expires = int(time.time()) + INVITATIONS_VALIDITY * 24 * 3600
+
+    token = random_ascii(64)
+    invite_file = USER_PENDING_INVITATIONS / f"{token}.json"
+    infos = {
+        "username": username,
+        "allowed_to_change_username": allow_to_change_username,
+        "domain": domain,
+        "expires": expires,
+        "groups": groups,
+        "external_email": external_email,
+        "mailbox_quota": mailbox_quota,
+    }
+
+    # Permission 1 (+x) for ynh-portal group will allow it to read the file if it does know its name
+    # but not to list the existing files
+    chmod(USER_PENDING_INVITATIONS, 0o710)
+    chown(USER_PENDING_INVITATIONS, "root", "ynh-portal")
+    write_to_json(str(invite_file), infos)
+    chmod(invite_file, 0o440)
+    chown(invite_file, "root", "ynh-portal")
+
+    # FIXME : expired invites should get cleanedup at some point
+
+    # FIXME: handle send_invite_via_email
+
+    # FIXME: when using send_invite_via_email, should check that the mail stack seems to be able to send emails according to diagnosis
+
+    if Moulinette.interface.type == "cli":
+        logger.info(f"The invitation link will expire after {INVITATIONS_VALIDITY} days.")
+        logger.info("Invitation link:")
+
+    return f"https://{domain}/yunohost/sso/register?invitation={token}"
+
+
+def user_invitation_cancel(token: str) -> None:
+    invite_file = USER_PENDING_INVITATIONS / f"{token}.json"
+    if not invite_file.exists():
+        # FIXME : i18n
+        raise YunohostValidationError("No invitation with this ID/token")
+
+    invite_file.unlink()
+    # FIXME : i18n
+    logger.success("The invitation was cancelled")
+
+
+def user_invitation_list(raw: bool = False) -> dict[Literal["invitations"], dict]:
+
+    from .utils.file_utils import read_json
+
+    invitations = []
+    # FIXME : ideally sort them by creation date
+    for file in USER_PENDING_INVITATIONS.glob("*.json"):
+        data = read_json(str(file))
+        token = file.name[:-len(".json")]
+
+        data["token"] = token
+        data["url"] = f"https://{data['domain']}/yunohost/sso/register?invitation={token}"
+
+        # If not raw, try to reduce noise and make it more human-friendly
+        if not raw:
+
+            del data["token"]
+            del data["domain"]
+            if not data["username"]:
+                del data["username"]
+                del data["allowed_to_change_username"]
+            if data["mailbox_quota"] in [None, "0"]:
+                del data["mailbox_quota"]
+            if not data["external_email"]:
+                del data["external_email"]
+            if not data["groups"]:
+                del data["groups"]
+
+            days_remaining = round((data['expires'] - time.time()) / (24 * 3600), 1)
+            data["validity"] = f"{days_remaining} days"
+            del data["expires"]
+
+        invitations.append(data)
+
+    return {"invitations": invitations}
+
+
+def user_invitation_consume() -> dict[Literal["error"], str]:
+
+    import sys, json
+    from stat import filemode
+    from .utils.file_utils import read_json
+
+    if sys.stdin.isatty():
+        raise YunohostError("user create-from-invite expects JSON data on stdin")
+
+    submitted_data = json.loads(sys.stdin.read())
+
+    data_keys = set(submitted_data.keys())
+    expected_keys = {"token", "username", "fullname", "password", "external_email"}
+    assert data_keys == expected_keys, f"Didn't get the expected keys in data, expected {expected_keys}, got {data_keys}"
+
+    token = submitted_data["token"]
+    assert isinstance(token, str) and token.isalnum() and len(token) == 64
+
+    invite_file = USER_PENDING_INVITATIONS / f"{token}.json"
+    if not invite_file.exists():
+        return {"error": m18n.n("user_invitation_expired_or_doesnt_exist")}
+
+    # Assert the permissions are right, which otherwise would be an indication that it can't be trusted
+    assert (USER_PENDING_INVITATIONS.owner(), USER_PENDING_INVITATIONS.group(), filemode(USER_PENDING_INVITATIONS.stat().st_mode)) == ("root", "ynh-portal", "drwx--x---")
+
+    # Assert the permissions are right, which otherwise would be an indication that it can't be trusted
+    assert (invite_file.owner(), invite_file.group(), filemode(invite_file.stat().st_mode)) == ("root", "ynh-portal", "-r--r-----")
+
+    invite_data = read_json(str(invite_file))
+
+    if invite_data["expires"] < time.time():
+        # FIXME: cleanup expired invitation files
+        return {"error": m18n.n("user_invitation_expired_or_doesnt_exist")}
+
+    username = submitted_data.get("username", "").strip()
+    if invite_data["username"]:
+        if username and not invite_data["allowed_to_change_username"]:
+            username = invite_data["username"]
+
+    fullname = submitted_data["fullname"]
+    password = submitted_data["password"]
+
+    domain = invite_data["domain"]
+    groups = invite_data["groups"]
+
+    external_email = invite_data["external_email"] or (submitted_data.get("external_email") or "").strip() or None
+    mailbox_quota = invite_data["mailbox_quota"]
+
+    # The following checks should already have been performed by the portal API
+    # But we should minimize the trust we put in the portal API user, as an additional layer of security
+    # NB: the regexes are just copypasta of the actionsmap
+    checks = {
+        ("Username should be at least 2 characters and contain only alphanumeric, '_' and '.' characters.",
+         lambda: isinstance(username, str) and re.match(r"^[a-z0-9_\.]+$", username) and len(username) >= 2 and len(username) < 100),
+        ("This fullname is incorrect",
+         lambda: isinstance(fullname, str) and re.match(r"^([^\W_]{1,30}[ ,.'-]{0,3})+$", fullname) and len(fullname) < 100),
+        ("Password should be a string",
+         lambda: isinstance(password, str)), # Password strength is checked during user_create() later
+        ("The external email is not valid email",
+         lambda: (external_email is None) or (isinstance(external_email, str) and re.match(r"^[\w.-]+@([^\W_A-Z]+([-]*[^\W_A-Z]+)*\.)+((xn--)?[^\W_]{2,})$", external_email))),
+        ("The domain is not a valid domain",
+         # Domain existence is checked during user_create() later
+         lambda: isinstance(domain, str) and re.match("^([^\W_A-Z]+([-]*[^\W_A-Z]+)*\.)+((xn--)?[^\W_]{2,})$", domain)),
+    }
+    for error, check in checks:
+        if not check():
+            raise YunohostValidationError(error, raw_msg=True)
+
+    # FIXME : handle groups
+    # assert isinstance(groups, list) and all(isinstance(group, str) for group in groups)
+
+    admin = "admins" in groups if groups else False
+
+    # FIXME : handle external_email
+
+    try:
+        user_create(username=username, domain=domain, password=password, fullname=fullname, admin=admin, mailbox_quota=mailbox_quota)
+    except YunohostValidationError as e:
+        return {"error": str(e)}
+    else:
+        invite_file.unlink()
+
+    if groups:
+        existing_groups = list(user_group_list()["groups"].keys())
+        for group in groups:
+            if group not in existing_groups:
+                logger.warning("Group {group} doesn't exist (anymore?)")
+            # FIXME : this may produce "info" messages that will mess the json output
+            user_group_add(group, [username])
+
+    return {"error": None}
+
+
+
+
+
+
+# user_registration_enable/disable
+# user_registration_list
+# user_registration_review
+# user_registration_accept
+# user_registration_reject
+
+
+
 def user_list(fields: list[str] | None = None) -> dict[str, dict[str, Any]]:
+
     from .utils.ldap import _get_ldap_interface
 
     ldap_attrs = {

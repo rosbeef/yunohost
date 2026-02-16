@@ -1,0 +1,8 @@
+[Socket]
+ListenStream=/run/yunohost-user-invite-consume.sock
+SocketUser=ynh-portal
+SocketMode=0600
+Accept=yes
+
+[Install]
+WantedBy=sockets.target
