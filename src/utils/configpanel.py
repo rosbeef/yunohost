@@ -827,7 +827,7 @@ class ConfigPanel:
             config = ConfigPanelModel(**raw_config)
         except ValidationError as e:
             raise YunohostError(
-                "Error while parsing config panel: " + e.errors()[0]["msg"],
+                f"Error while parsing config panel: {e}",
                 raw_msg=True,
             )
         config, raw_settings = self._get_partial_raw_settings_and_mutate_config(config)

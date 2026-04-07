@@ -2138,6 +2138,11 @@ def app_ssowatconf() -> None:
         # Update with the new settings
         portal_settings.update(portal_email_settings)
 
+        raw_domain_settings = _get_raw_domain_settings(domain)
+        portal_settings["enable_self_registration"] = bool(raw_domain_settings.get("enable_self_registration", False))
+        portal_settings["registration_tos"] = raw_domain_settings.get("registration_tos", "").strip() or None
+        portal_settings["registration_self_registration_notes"] = raw_domain_settings.get("registration_self_registration_notes", "").strip() or None
+
         # Do no override anything else than "apps" since the file is shared
         # with domain's config panel "portal" options
         portal_settings["apps"] = apps
@@ -2616,6 +2621,31 @@ def regen_mail_app_user_config_for_dovecot_and_postfix(
 
     postfix_map = []
     dovecot_passwd = []
+
+    # Also need a root account that can authenticate on the mail stack
+    # to be able to send external emails which are DKIM-signed
+    # (ofc it would be much easier if we could use unix sock auth or something but hmpf)
+    if dovecot:
+        password = read_file("/etc/yunohost/.email_auth_secret").strip()
+        hashed_password = _hash_user_password(password)
+        dovecot_passwd.append(
+            f"root:{hashed_password}::::::allow_nets=::1,127.0.0.1/24"
+        )
+    if postfix:
+
+        import os
+        # This function is called by the regen conf script
+        # and we can get the info from there ... instead of using domain_list(...) with features= arg,
+        # which then calls a bunch of config panel shenanigans and we don't have enough context loaded in there (it crashes because of translation whatev)...
+        mail_out_domains = os.environ["YNH_DOMAINS_WITH_MAIL_OUT"].split(" ")
+        main_domains = os.environ["YNH_MAIN_DOMAINS"].split(" ")
+        for mail_domain in mail_out_domains:
+            if mail_domain not in main_domains:
+                continue
+            for mail_user in ["root", "admin", "admins", "no-reply", "registrations"]:
+                postfix_map.append(f"{mail_user}@{mail_domain} root")
+
+    # Now for the app credentials
     for app in _installed_apps():
         settings = _get_app_settings(app)
 

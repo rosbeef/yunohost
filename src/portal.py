@@ -85,6 +85,9 @@ def _get_portal_settings(
         "portal_allow_edit_email": False,
         "portal_allow_edit_email_alias": False,
         "portal_allow_edit_email_forward": False,
+        "enable_self_registration": False,
+        "registration_self_registration_notes": None,
+        "registration_tos": None
     }
 
     portal_settings_path = Path(f"{PORTAL_SETTINGS_DIR}/{domain}.json")

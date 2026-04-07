@@ -246,11 +246,6 @@ user:
                     help: Username for the user. Leave empty to let the user pick the username.
                     extra:
                         pattern: *pattern_username
-                -U:
-                    full: --allow-to-change-username
-                    help: If a username was specified, allow the user to change the username during registration.
-                    default: False
-                    action: store_true
                 -d:
                     full: --domain
                     help: Main domain this user will be related to, used to define the email address and which app the user has access to
@@ -285,6 +280,12 @@ user:
                     default: False
                     action: store_true
                     help: Send the invitation by email to this user, using the chosen external mail address.
+                -N:
+                    full: --notify-admins-when-invite-is-consumed
+                    default: False
+                    action: store_true
+                    help: Notify admins once the account is created
+
 
     subcategories:
 
@@ -368,13 +369,6 @@ user:
                             help: Also display primary groups (each user has an eponym group that only contains itself)
                             action: store_true
                             default: false
-                        usernames:
-                            help: User(s) to add in the group
-                            nargs: "*"
-                            metavar: USERNAME
-                            extra:
-                                pattern: *pattern_username
-                                autocomplete: *users_list
 
                 ### user_group_create()
                 create:

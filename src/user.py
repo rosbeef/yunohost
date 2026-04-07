@@ -86,7 +86,7 @@ def user_invite(*args, **kwargs):
     return user_invitation_generate(*args, **kwargs)
 
 
-def user_invitation_generate(domain, username=None, groups=[], external_email=None, mailbox_quota="0", send_invite_via_email=False, allow_to_change_username=False) -> str:
+def user_invitation_generate(domain, username=None, groups=[], external_email=None, mailbox_quota="0", send_invite_via_email=False, notify_admins_when_invite_is_consumed=False) -> str:
 
     from .domain import domain_list, _get_maindomain, _assert_domain_exists
     from .utils.misc import random_ascii
@@ -123,7 +123,6 @@ def user_invitation_generate(domain, username=None, groups=[], external_email=No
     invite_file = USER_PENDING_INVITATIONS / f"{token}.json"
     infos = {
         "username": username,
-        "allowed_to_change_username": allow_to_change_username,
         "domain": domain,
         "expires": expires,
         "groups": groups,
@@ -150,6 +149,31 @@ def user_invitation_generate(domain, username=None, groups=[], external_email=No
         logger.info("Invitation link:")
 
     return f"https://{domain}/yunohost/sso/register?invitation={token}"
+
+def _send_invite_email(domain):
+
+    from smtplib import SMTP
+    from .utils.file_utils import read_file
+    from email.message import EmailMessage
+    from email.utils import formataddr
+
+    msg = EmailMessage()
+    msg['From'] = f"registrations@{domain}"
+    msg['Reply-To'] = f"no-reply@{domain}"
+    msg['To'] = f"alex@{domain}"
+    msg['Subject'] = "You are invited to create an account on {domain}"
+    msg.set_content("""
+    aaaaaaam testing the mail mechanism
+
+    Note: This is an automatic message.
+    """)
+
+    password = read_file("/etc/yunohost/.email_auth_secret")
+    with SMTP("localhost") as smtp:
+        smtp.starttls()
+        smtp.login("root", password)
+        smtp.send_message(msg)
+
 
 
 def user_invitation_cancel(token: str) -> None:
@@ -298,6 +322,7 @@ def user_invitation_consume() -> dict[Literal["error"], str]:
 
 
 # user_registration_enable/disable
+# user_registration_queue
 # user_registration_list
 # user_registration_review
 # user_registration_accept

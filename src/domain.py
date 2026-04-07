@@ -889,6 +889,9 @@ def _get_DomainConfigPanel() -> type["ConfigPanel"]:
                 "search_engine_name",
                 "portal_user_intro",
                 "portal_public_intro",
+                "enable_self_registration",
+                "registration_tos",
+                "registration_self_registration_notes",
             ]
 
             if _get_parent_domain_of(self.entity, topest=True) is None and any(
